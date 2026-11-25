@@ -1,0 +1,67 @@
+name: Verify release asset attestation
+
+on:
+  push:
+    branches: [codex/verify-release-attestation]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - name: Prepare synthetic Windows archives and test data
+      shell: bash
+      run: |
+        mkdir staged
+        for architecture in x86 x64 arm64; do
+          for linkage in static dynamic; do
+            triplet=$architecture-windows-$linkage
+            printf 'Synthetic Brotli attestation fixture for %s\n' "$triplet" > fixture.txt
+            zip -q "staged/brotli-$triplet.zip" fixture.txt
+          done
+        done
+        printf '%s\n' 'Synthetic test data for attestation verification' > fixture.txt
+        tar -cJf staged/testdata.txz fixture.txt
+    - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      with:
+        name: fixture-packages
+        path: staged/*
+        if-no-files-found: error
+        retention-days: 2
+
+  attest:
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        path: release_assets
+        merge-multiple: true
+    - name: Attest release assets
+      id: attest
+      uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+      with:
+        subject-path: release_assets/*
+    - name: Verify provenance for every fixture
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+      shell: bash
+      run: |
+        assets=(release_assets/*)
+        test "${#assets[@]}" -eq 7
+        for asset in "${assets[@]}"; do
+          gh attestation verify "$asset" --repo "$GITHUB_REPOSITORY" --bundle "$BUNDLE" \
+            --source-digest "$GITHUB_SHA" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/verify-release-attestation.yml" \
+            --deny-self-hosted-runners
+        done
